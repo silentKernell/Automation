@@ -818,10 +818,26 @@ if __name__ == "__main__":
         # Send message with human-like typing
         # bot.open_chat("~Taliban Mkristu")
         # bot.send_message("Hello! This message is typed character by character.")
+        message = """
+👋 *Hello,*
+
+A bit unconventional—but intentional.
+
+I’m expanding my circle with *focused, growth-minded people* 🚀
+*Accountant 📊 | Data Analyst 📈 | Digital Marketer 💻*
+
+I value *real connections, insights, and opportunities.*
+
+👉 If that resonates, kindly *reply with your name* (as you’d like it saved).
+👉 If not, no worries at all 👍 — no follow-ups from me.
+
+*Wishing you growth and success either way.* ✨
+
+        """
         
         # Example 2: Broadcast to CSV contacts
-        # contacts = bot.load_contacts_from_csv("contacts.csv")
-        # bot.broadcast_to_contacts(contacts, "Hello from broadcast!", identifier_field='name')
+        contacts = bot.load_contacts_from_csv("/home/kernel/projects/watsApp/contacts_1.csv")
+        bot.broadcast_to_contacts(contacts, message, identifier_field='name')
         
         # Example 3: Get linking code for new device
         # code = bot.get_linking_code()
@@ -830,11 +846,11 @@ if __name__ == "__main__":
         # bot.send_image_high_quality("/path/to/image.jpg", "Check this out!")
         
         # Example 5: Watch status updates
-        def on_status(status):
-            print(f"New status from {status['contact']} at {status['timestamp']}")
-        bot.start_status_watcher(callback=on_status)
-        time.sleep(60)  # Watch for 1 minute
-        bot.stop_status_watcher()
+        # def on_status(status):
+        #     print(f"New status from {status['contact']} at {status['timestamp']}")
+        # bot.start_status_watcher(callback=on_status)
+        # time.sleep(60)  # Watch for 1 minute
+        # bot.stop_status_watcher()
         
         # Example 6: Group messaging
         # groups = bot.get_group_list()

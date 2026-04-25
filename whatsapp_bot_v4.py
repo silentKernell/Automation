@@ -3,12 +3,13 @@ WhatsApp Web Automation Tool — v4 (ELITE Edition)
 Features:
 - Human-like typing simulation (character by character)
 - CSV contact list broadcasting with cooldown
-- Status watcher for contact statuses
-- ✅ POST STATUS (Text, Photo, Video) ← NEW
+- ✅ Robust Status Watcher for contact statuses (FIXED)
+- ✅ POST STATUS (Text, Photo, Video) with privacy controls
 - Linked device pairing via terminal code
 - Group messaging support
 - High-quality media sending
 - Anti-detection & stealth measures
+- ✅ Enhanced chat opening (existing + new contacts)
 """
 
 import os
@@ -41,6 +42,7 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
     WebDriverException,
     ElementClickInterceptedException,
+    ElementNotInteractableException,
 )
 
 # Optional: for better stealth
@@ -91,21 +93,17 @@ class Sel:
     ATTACH_IMG_INPUT = '//input[@accept="image/*,video/mp4,video/3gpp,video/quicktime"]'
     ATTACH_DOC_INPUT = '//input[@accept="*"]'
     
-    # Status (Viewing)
+    # Status (Viewing) - IMPROVED SELECTORS
     STATUS_UPDATES = '//div[@aria-label="Status updates"]'
     STATUS_THUMBNAIL = '//div[@data-testid="status-thumbnail"]'
     STATUS_VIEWER = '//div[@data-testid="status-viewer"]'
     STATUS_TEXT = '//div[@data-testid="status-text"]'
-    STATUS_MUTE_BTN = '//button[@aria-label="Mute status updates"]'
+    STATUS_CONTACT_NAME = './/span[@dir="auto"]'
+    STATUS_CLOSE_BTN = '//div[@data-testid="status-viewer-close-button"]'
     
-    # ── NEW: Status Posting Selectors ──────────────────────────────────────
-    # My Status section (for posting)
+    # Status Posting Selectors
     MY_STATUS = '//div[@data-testid="my-status"]'
     MY_STATUS_ADD_BTN = '//div[@data-testid="my-status"]//button'
-    MY_STATUS_TEXT = '//div[@data-testid="my-status-text"]'
-    
-    # Status composer
-    STATUS_COMPOSER = '//div[@data-testid="status-composer"]'
     STATUS_TEXT_INPUT = '//div[@contenteditable="true"][@data-testid="status-text-input"]'
     STATUS_PHOTO_VIDEO_BTN = '//div[@data-testid="status-photo-video-btn"]'
     STATUS_CAPTION_INPUT = '//div[@contenteditable="true"][@data-testid="status-caption-input"]'
@@ -114,25 +112,21 @@ class Sel:
     
     # Status privacy
     STATUS_PRIVACY_BTN = '//div[@data-testid="status-privacy-btn"]'
-    STATUS_PRIVACY_OPTIONS = '//div[@role="menuitem"]'
     STATUS_PRIVACY_MY_CONTACTS = '//span[contains(text(), "My contacts")]'
     STATUS_PRIVACY_EXCEPT = '//span[contains(text(), "My contacts except...")]'
     STATUS_PRIVACY_ONLY_SHARE = '//span[contains(text(), "Only share with...")]'
     
-    # Status media preview
-    STATUS_PREVIEW_IMAGE = '//div[@data-testid="status-preview-image"]'
-    STATUS_PREVIEW_VIDEO = '//div[@data-testid="status-preview-video"]'
-    
-    # Groups
-    GROUP_INFO = '//div[@data-testid="conversation-panel-header"]'
-    GROUP_MEMBERS = '//div[@data-testid="group-members"]'
-    
-    # New chat
-    NEW_CHAT_BTN = '//button[@aria-label="New chat"]'
-    NEW_CHAT_SEARCH = '//p[@class="selectable-text copyable-text"]'
-    
     # Navigation
     NAV_STATUS = '//button[@data-testid="navbar-item-status"]'
+    NAV_CHATS = '//button[@data-testid="navbar-item-chats"]'
+    
+    # New Chat Button and Interface
+    NEW_CHAT_BTN = '//button[@aria-label="New chat"]'
+    NEW_CHAT_SEARCH = '//p[@class="selectable-text copyable-text"]'
+    NEW_CHAT_RESULT = '//div[@role="option"]'
+    
+    # Back button
+    BACK_BTN = '//div[@aria-label="Back"]'
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -167,7 +161,7 @@ class BotConfig:
     
     # Status posting
     status_post_delay: float = 2.0
-    status_expiry_hours: int = 24  # Status auto-expires after 24 hours
+    status_expiry_hours: int = 24
     
     # Anti-detection
     random_delay_range: Tuple[float, float] = (0.5, 2.0)
@@ -184,10 +178,7 @@ class BotConfig:
 
 # ── Enhanced WhatsApp Bot v4 (ELITE) ──────────────────────────────────────────
 class WhatsAppBot:
-    """
-    Professional WhatsApp automation with all requested features including
-    status posting capabilities (text, photo, video).
-    """
+    """Professional WhatsApp automation with status posting and watching."""
     
     WHATSAPP_URL = "https://web.whatsapp.com"
     
@@ -199,6 +190,7 @@ class WhatsAppBot:
         self._status_watcher: Optional[Thread] = None
         self._stop_status_watcher = Event()
         self._status_callbacks: List[Callable] = []
+        self._seen_statuses: set = set()
         self._message_queue = Queue()
         self._is_processing_queue = False
         
@@ -251,7 +243,7 @@ class WhatsAppBot:
             element.send_keys(Keys.DELETE)
             time.sleep(0.2)
         
-        for i, char in enumerate(text):
+        for char in text:
             element.send_keys(char)
             
             delay = random.uniform(*self.config.typing_speed_range)
@@ -277,7 +269,6 @@ class WhatsAppBot:
             return
             
         try:
-            rect = target_element.rect
             x_offset = random.randint(-5, 5)
             y_offset = random.randint(-5, 5)
             
@@ -363,6 +354,203 @@ class WhatsAppBot:
         formatted = f"{phone_number}".replace("+", "").replace(" ", "")
         self.open_chat(formatted)
     
+    # ── ENHANCED CHAT OPENING (Handles Existing + New Chats) ──────────────
+    
+    def open_chat(self, contact_name: str, force_new_chat: bool = False) -> bool:
+        """
+        Open a chat by contact name. Robustly handles both existing chats and new contacts.
+        
+        Args:
+            contact_name: Name or phone number of the contact
+            force_new_chat: If True, always create a new chat even if existing found
+        
+        Returns:
+            bool: True if chat opened successfully
+        """
+        logger.info(f"Opening chat: {contact_name}")
+        
+        # First, ensure we're in the chat list view
+        self._ensure_chat_list_view()
+        
+        # Get the search box
+        search = self._find(Sel.SEARCH_BOX)
+        search.click()
+        time.sleep(0.3)
+        
+        # Clear search box
+        search.send_keys(Keys.CONTROL + "a")
+        search.send_keys(Keys.DELETE)
+        time.sleep(0.2)
+        
+        # Type search term with human delay
+        self._human_type(search, contact_name, clear_first=False)
+        time.sleep(1.5)
+        
+        # Try to find existing chat
+        row_xpath = Sel.CHAT_ROW_BY_NAME.format(name=contact_name)
+        
+        if not force_new_chat:
+            try:
+                row = WebDriverWait(self.driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, row_xpath))
+                )
+                self._human_mouse_move(row)
+                row.click()
+                time.sleep(0.8)
+                logger.info(f"✅ Existing chat opened: {contact_name}")
+                return True
+            except TimeoutException:
+                logger.info(f"Chat '{contact_name}' not found, creating new chat...")
+        
+        # Create new chat
+        return self._create_new_chat(contact_name)
+    
+    def _ensure_chat_list_view(self) -> None:
+        """Ensure we're in the chat list view, not inside a chat."""
+        try:
+            # Check if we're inside a chat by looking for message input
+            msg_input_exists = self._exists(Sel.MSG_INPUT, timeout=1)
+            
+            if msg_input_exists:
+                # We're in a chat, go back to chat list
+                try:
+                    back_btn = self._find(Sel.BACK_BTN, timeout=3)
+                    back_btn.click()
+                    time.sleep(0.8)
+                except:
+                    # Try ESC key
+                    self.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
+                    time.sleep(0.5)
+                    
+                # Also ensure we're on Chats tab
+                chats_tab = self._find(Sel.NAV_CHATS, timeout=5)
+                chats_tab.click()
+                time.sleep(0.5)
+        except:
+            pass
+    
+    def _create_new_chat(self, contact_name: str) -> bool:
+        """Create and open a new chat with a contact."""
+        try:
+            # Clear any existing search
+            search = self._find(Sel.SEARCH_BOX)
+            search.send_keys(Keys.ESCAPE)
+            time.sleep(0.5)
+            
+            # Click the New Chat button
+            new_chat_btn = self._find_new_chat_button()
+            new_chat_btn.click()
+            time.sleep(1)
+            
+            # Find and interact with the new chat search input
+            new_chat_search = self._find_new_chat_search_input()
+            new_chat_search.click()
+            time.sleep(0.3)
+            
+            # Type the contact name
+            self._human_type(new_chat_search, contact_name, clear_first=True)
+            time.sleep(1.5)
+            
+            # Select the contact from search results
+            if not self._select_contact_from_search(contact_name):
+                # Try with phone number format
+                logger.warning(f"Could not find '{contact_name}', trying as phone number...")
+                new_chat_search.click()
+                self._human_type(new_chat_search, Keys.CONTROL + "a", clear_first=False)
+                self._human_type(new_chat_search, Keys.DELETE, clear_first=False)
+                time.sleep(0.3)
+                
+                phone_formatted = re.sub(r'[^0-9+]', '', contact_name)
+                self._human_type(new_chat_search, phone_formatted, clear_first=False)
+                time.sleep(1.5)
+                
+                if not self._select_contact_from_search(contact_name):
+                    # Press Enter to create chat with phone number directly
+                    new_chat_search.send_keys(Keys.RETURN)
+                    time.sleep(1)
+            
+            time.sleep(1.5)
+            logger.info(f"✅ New chat created: {contact_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to create new chat: {e}")
+            return False
+    
+    def _find_new_chat_button(self):
+        """Find the New Chat button using multiple strategies."""
+        strategies = [
+            Sel.NEW_CHAT_BTN,
+            '//div[@data-testid="new-chat-button"]',
+            '//span[@data-testid="new-chat-outline"]/ancestor::button',
+            '//button[.//span[@data-testid="new-chat-outline"]]',
+        ]
+        
+        for strategy in strategies:
+            try:
+                btn = WebDriverWait(self.driver, 3).until(
+                    EC.element_to_be_clickable((By.XPATH, strategy))
+                )
+                return btn
+            except:
+                continue
+        
+        raise TimeoutException("Could not find New Chat button")
+    
+    def _find_new_chat_search_input(self):
+        """Find the search input in the New Chat interface."""
+        strategies = [
+            Sel.NEW_CHAT_SEARCH,
+            '//div[@contenteditable="true"][@data-tab="3"]',
+            '//input[@placeholder="Search"]',
+        ]
+        
+        for strategy in strategies:
+            try:
+                search_input = WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((By.XPATH, strategy))
+                )
+                return search_input
+            except:
+                continue
+        
+        return self._find(Sel.SEARCH_BOX)
+    
+    def _select_contact_from_search(self, contact_name: str) -> bool:
+        """Select a contact from search results."""
+        strategies = [
+            f'//span[@title="{contact_name}"]',
+            f'//div[contains(text(), "{contact_name}")]',
+            f'//span[contains(text(), "{contact_name}")]',
+            Sel.NEW_CHAT_RESULT,
+        ]
+        
+        for strategy in strategies:
+            try:
+                time.sleep(0.5)
+                elements = self.driver.find_elements(By.XPATH, strategy)
+                for element in elements:
+                    if contact_name.lower() in element.text.lower():
+                        self._human_mouse_move(element)
+                        element.click()
+                        time.sleep(0.5)
+                        return True
+            except:
+                continue
+        
+        # Fallback: press Enter to select first result
+        try:
+            search_input = self.driver.switch_to.active_element
+            search_input.send_keys(Keys.ARROW_DOWN)
+            time.sleep(0.3)
+            search_input.send_keys(Keys.RETURN)
+            time.sleep(0.5)
+            return True
+        except:
+            pass
+        
+        return False
+    
     # ── Enhanced Messaging ────────────────────────────────────────────────
     
     def send_message(self, text: str) -> None:
@@ -371,7 +559,7 @@ class WhatsAppBot:
             logger.warning("Empty message, skipped.")
             return
             
-        logger.info(f"✍️ Typing: {text[:50]}..." if len(text) > 50 else f"✍️ Sending: {text}")
+        logger.info(f"✍️ Sending: {text[:50]}..." if len(text) > 50 else f"✍️ Sending: {text}")
         
         box = self._find(Sel.MSG_INPUT, timeout=15)
         box.click()
@@ -393,17 +581,186 @@ class WhatsAppBot:
         return False
     
     # ════════════════════════════════════════════════════════════════════════
-    # ║                    NEW: STATUS POSTING CAPABILITIES                    ║
+    # ║                    IMPROVED STATUS WATCHER                            ║
     # ════════════════════════════════════════════════════════════════════════
     
-    def _navigate_to_status(self) -> bool:
-        """Navigate to the status section."""
+    def start_status_watcher(self, callback: Optional[Callable] = None) -> None:
+        """Start background thread to watch for new status updates."""
+        if callback:
+            self._status_callbacks.append(callback)
+            
+        if self._status_watcher and self._status_watcher.is_alive():
+            logger.warning("Status watcher already running")
+            return
+            
+        self._stop_status_watcher.clear()
+        self._seen_statuses.clear()
+        self._status_watcher = Thread(target=self._watch_status_loop, daemon=True)
+        self._status_watcher.start()
+        logger.info("👁️ Status watcher started")
+        
+    def stop_status_watcher(self) -> None:
+        """Stop the status watcher thread."""
+        self._stop_status_watcher.set()
+        if self._status_watcher:
+            self._status_watcher.join(timeout=5)
+        logger.info("Status watcher stopped")
+        
+    def add_status_callback(self, callback: Callable) -> None:
+        """Add callback function for status updates."""
+        self._status_callbacks.append(callback)
+    
+    def _watch_status_loop(self) -> None:
+        """Background loop checking for status updates - IMPROVED."""
+        last_update_time = datetime.now()
+        consecutive_errors = 0
+        
+        while not self._stop_status_watcher.is_set():
+            try:
+                # Navigate to status section
+                status_tab = self._find(Sel.NAV_STATUS, timeout=10)
+                status_tab.click()
+                time.sleep(1.5)
+                
+                # Find status updates section
+                status_updates_section = self._find(Sel.STATUS_UPDATES, timeout=5)
+                
+                # Get all status thumbnails (contacts who posted)
+                status_thumbnails = self.driver.find_elements(By.XPATH, Sel.STATUS_THUMBNAIL)
+                
+                for thumbnail in status_thumbnails:
+                    try:
+                        # Get contact name
+                        name_element = thumbnail.find_element(By.XPATH, Sel.STATUS_CONTACT_NAME)
+                        contact_name = name_element.text.strip()
+                        
+                        if not contact_name:
+                            continue
+                        
+                        # Create unique ID for this status
+                        status_id = f"{contact_name}_{datetime.now().strftime('%Y%m%d_%H')}"
+                        
+                        if status_id not in self._seen_statuses:
+                            self._seen_statuses.add(status_id)
+                            
+                            # Try to get status preview/text
+                            status_text = ""
+                            try:
+                                # Click to view status
+                                thumbnail.click()
+                                time.sleep(2)
+                                
+                                # Extract status text if any
+                                text_element = self._find(Sel.STATUS_TEXT, timeout=3)
+                                status_text = text_element.text if text_element else ""
+                                
+                                # Close status viewer
+                                close_btn = self._find(Sel.STATUS_CLOSE_BTN, timeout=3)
+                                close_btn.click()
+                                time.sleep(0.5)
+                            except:
+                                pass
+                            
+                            status_data = {
+                                'contact': contact_name,
+                                'timestamp': datetime.now().isoformat(),
+                                'text': status_text,
+                                'type': 'status_update'
+                            }
+                            
+                            logger.info(f"📢 New status detected from: {contact_name}")
+                            
+                            # Notify callbacks
+                            for callback in self._status_callbacks:
+                                try:
+                                    callback(status_data)
+                                except Exception as e:
+                                    logger.error(f"Status callback error: {e}")
+                                    
+                    except Exception as e:
+                        continue
+                
+                # Reset error counter on success
+                consecutive_errors = 0
+                last_update_time = datetime.now()
+                
+                # Return to chats view to avoid getting stuck
+                chats_tab = self._find(Sel.NAV_CHATS, timeout=5)
+                chats_tab.click()
+                
+                time.sleep(self.config.watch_status_interval)
+                
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"Status watcher error ({consecutive_errors}): {e}")
+                
+                # Exponential backoff on errors
+                backoff = min(30, consecutive_errors * 2)
+                time.sleep(backoff)
+                
+                # Try to recover by refreshing
+                if consecutive_errors > 5:
+                    logger.warning("Too many errors, attempting refresh...")
+                    try:
+                        self.driver.refresh()
+                        time.sleep(5)
+                        consecutive_errors = 0
+                    except:
+                        pass
+    
+    def view_contact_status(self, contact_name: str) -> Optional[Dict]:
+        """View a specific contact's status and return details."""
         try:
-            # Click on Status tab in navigation
+            # Navigate to status
             status_tab = self._find(Sel.NAV_STATUS, timeout=10)
             status_tab.click()
             time.sleep(1.5)
-            logger.info("📱 Navigated to Status section")
+            
+            # Find the contact's status
+            status_thumbnails = self.driver.find_elements(By.XPATH, Sel.STATUS_THUMBNAIL)
+            
+            for thumbnail in status_thumbnails:
+                name_element = thumbnail.find_element(By.XPATH, Sel.STATUS_CONTACT_NAME)
+                if contact_name.lower() in name_element.text.lower():
+                    # Click to view
+                    thumbnail.click()
+                    time.sleep(2)
+                    
+                    # Extract status text
+                    status_text = ""
+                    try:
+                        text_element = self._find(Sel.STATUS_TEXT, timeout=3)
+                        status_text = text_element.text if text_element else ""
+                    except:
+                        pass
+                    
+                    # Close viewer
+                    close_btn = self._find(Sel.STATUS_CLOSE_BTN, timeout=3)
+                    close_btn.click()
+                    
+                    return {
+                        'contact': contact_name,
+                        'text': status_text,
+                        'viewed_at': datetime.now().isoformat()
+                    }
+            
+            logger.warning(f"No status found for {contact_name}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to view status: {e}")
+            return None
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # ║                    STATUS POSTING CAPABILITIES                        ║
+    # ════════════════════════════════════════════════════════════════════════
+    
+    def _navigate_to_status_section(self) -> bool:
+        """Navigate to the status section for posting."""
+        try:
+            status_tab = self._find(Sel.NAV_STATUS, timeout=10)
+            status_tab.click()
+            time.sleep(1)
             return True
         except Exception as e:
             logger.error(f"Failed to navigate to Status: {e}")
@@ -412,43 +769,32 @@ class WhatsAppBot:
     def post_text_status(self, text: str, 
                          background_color: Optional[str] = None,
                          font_size: str = "normal") -> bool:
-        """
-        Post a text status update.
-        
-        Args:
-            text: Status text content
-            background_color: Optional background color (e.g., "#FF0000" or "blue")
-            font_size: "small", "normal", or "large"
-        
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Post a text status update."""
         logger.info(f"📝 Posting text status: {text[:50]}...")
         
-        if not self._navigate_to_status():
+        if not self._navigate_to_status_section():
             return False
         
         try:
-            # Find and click on My Status area to add new status
+            # Click on My Status to add new status
             my_status = self._find(Sel.MY_STATUS, timeout=10)
             my_status.click()
             time.sleep(1)
             
-            # Find text status button
+            # Click text status button
             text_status_btn = self._find('//button[@aria-label="Text status"]', timeout=5)
             text_status_btn.click()
             time.sleep(1)
             
-            # Find the text input area
+            # Find and type in text input
             text_input = self._find(Sel.STATUS_TEXT_INPUT, timeout=10)
             text_input.click()
             time.sleep(0.3)
             
-            # Type the status text with human-like typing
             self._human_type(text_input, text, clear_first=True)
             time.sleep(0.5)
             
-            # Change background color if specified
+            # Change background if specified
             if background_color:
                 self._change_status_background(background_color)
                 time.sleep(0.5)
@@ -476,13 +822,10 @@ class WhatsAppBot:
             bg_btn = self._find('//button[@aria-label="Background"]', timeout=5)
             bg_btn.click()
             time.sleep(0.5)
-            
-            # Try to find color by value or aria-label
             color_btn = self._find(f'//div[@aria-label="{color}"]', timeout=3)
             color_btn.click()
-            time.sleep(0.3)
         except:
-            logger.warning(f"Could not set background color to {color}")
+            logger.warning(f"Could not set background to {color}")
     
     def _change_status_font_size(self, size: str) -> None:
         """Change status font size."""
@@ -490,25 +833,14 @@ class WhatsAppBot:
             font_btn = self._find('//button[@aria-label="Font size"]', timeout=5)
             font_btn.click()
             time.sleep(0.5)
-            
             size_map = {"small": "Small", "normal": "Normal", "large": "Large"}
             size_btn = self._find(f'//span[contains(text(), "{size_map[size]}")]', timeout=3)
             size_btn.click()
-            time.sleep(0.3)
         except:
             logger.warning(f"Could not set font size to {size}")
     
     def post_photo_status(self, image_path: str, caption: str = "") -> bool:
-        """
-        Post a photo status update.
-        
-        Args:
-            image_path: Path to the image file
-            caption: Optional caption text
-        
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Post a photo status update."""
         abs_path = str(Path(image_path).resolve())
         if not Path(abs_path).exists():
             logger.error(f"Image not found: {abs_path}")
@@ -516,41 +848,32 @@ class WhatsAppBot:
             
         logger.info(f"🖼️ Posting photo status: {abs_path}")
         
-        if not self._navigate_to_status():
+        if not self._navigate_to_status_section():
             return False
         
         try:
-            # Click on My Status to add new status
             my_status = self._find(Sel.MY_STATUS, timeout=10)
             my_status.click()
             time.sleep(1)
             
-            # Find and click the photo/video button
             media_btn = self._find(Sel.STATUS_PHOTO_VIDEO_BTN, timeout=10)
             media_btn.click()
             time.sleep(1)
             
-            # Find file input and upload image
             file_input = self._find('//input[@type="file"][@accept="image/*,video/*"]', timeout=10)
-            
-            # Make input visible if hidden
             self.driver.execute_script("arguments[0].style.display = 'block';", file_input)
             file_input.send_keys(abs_path)
             
-            # Wait for upload and preview
             time.sleep(3)
             
-            # Add caption if provided
             if caption:
                 try:
                     caption_input = self._find(Sel.STATUS_CAPTION_INPUT, timeout=5)
                     caption_input.click()
                     self._human_type(caption_input, caption)
-                    time.sleep(0.5)
                 except:
                     logger.warning("Could not add caption")
             
-            # Send status
             send_btn = self._find(Sel.STATUS_SEND_BTN, timeout=10)
             send_btn.click()
             
@@ -563,61 +886,40 @@ class WhatsAppBot:
             return False
     
     def post_video_status(self, video_path: str, caption: str = "") -> bool:
-        """
-        Post a video status update (max 60 seconds as per WhatsApp).
-        
-        Args:
-            video_path: Path to the video file
-            caption: Optional caption text
-        
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Post a video status update."""
         abs_path = str(Path(video_path).resolve())
         if not Path(abs_path).exists():
             logger.error(f"Video not found: {abs_path}")
             return False
             
-        # Check video size
-        video_size_mb = Path(abs_path).stat().st_size / (1024 * 1024)
-        if video_size_mb > self.config.max_video_size_mb:
-            logger.warning(f"Video size ({video_size_mb:.1f}MB) exceeds recommended limit")
-        
         logger.info(f"🎬 Posting video status: {abs_path}")
         
-        if not self._navigate_to_status():
+        if not self._navigate_to_status_section():
             return False
         
         try:
-            # Click on My Status to add new status
             my_status = self._find(Sel.MY_STATUS, timeout=10)
             my_status.click()
             time.sleep(1)
             
-            # Find and click the photo/video button
             media_btn = self._find(Sel.STATUS_PHOTO_VIDEO_BTN, timeout=10)
             media_btn.click()
             time.sleep(1)
             
-            # Find file input and upload video
             file_input = self._find('//input[@type="file"][@accept="image/*,video/*"]', timeout=10)
             self.driver.execute_script("arguments[0].style.display = 'block';", file_input)
             file_input.send_keys(abs_path)
             
-            # Wait for upload and preview
             time.sleep(4)
             
-            # Add caption if provided
             if caption:
                 try:
                     caption_input = self._find(Sel.STATUS_CAPTION_INPUT, timeout=5)
                     caption_input.click()
                     self._human_type(caption_input, caption)
-                    time.sleep(0.5)
                 except:
                     logger.warning("Could not add caption")
             
-            # Send status
             send_btn = self._find(Sel.STATUS_SEND_BTN, timeout=10)
             send_btn.click()
             
@@ -631,21 +933,10 @@ class WhatsAppBot:
     
     def post_quote_status(self, quote: str, author: str = "", 
                           background_color: str = "#075E54") -> bool:
-        """
-        Post a quote as a text status with nice formatting.
-        
-        Args:
-            quote: The quote text
-            author: Quote author (optional)
-            background_color: Background color
-        
-        Returns:
-            bool: True if successful
-        """
+        """Post a quote as a text status."""
         formatted_quote = f"✨ {quote} ✨"
         if author:
             formatted_quote += f"\n\n— {author}"
-        
         return self.post_text_status(formatted_quote, background_color=background_color)
     
     def post_motivational_quote(self) -> bool:
@@ -655,30 +946,24 @@ class WhatsAppBot:
             ("Success is not final, failure is not fatal.", "Winston Churchill"),
             ("Believe you can and you're halfway there.", "Theodore Roosevelt"),
             ("It does not matter how slowly you go as long as you do not stop.", "Confucius"),
-            ("Dream it. Wish it. Do it.", ""),
-            ("Your limitation—it’s only your imagination.", ""),
-            ("Push yourself, because no one else is going to do it for you.", ""),
         ]
         quote, author = random.choice(quotes)
         return self.post_quote_status(quote, author)
     
     def delete_my_status(self) -> bool:
-        """Delete the currently displayed my status."""
+        """Delete the current status."""
         try:
-            if not self._navigate_to_status():
+            if not self._navigate_to_status_section():
                 return False
             
-            # Click on My Status to view
             my_status = self._find(Sel.MY_STATUS, timeout=10)
             my_status.click()
             time.sleep(1.5)
             
-            # Find and click delete button
             delete_btn = self._find(Sel.STATUS_DELETE_BTN, timeout=5)
             delete_btn.click()
             time.sleep(1)
             
-            # Confirm deletion
             confirm_btn = self._find('//button[contains(text(), "Delete")]', timeout=5)
             confirm_btn.click()
             
@@ -691,17 +976,11 @@ class WhatsAppBot:
             return False
     
     def set_status_privacy(self, privacy_type: str = "my_contacts") -> bool:
-        """
-        Set status privacy settings.
-        
-        Args:
-            privacy_type: "my_contacts", "only_share", "except"
-        """
+        """Set status privacy settings."""
         try:
-            if not self._navigate_to_status():
+            if not self._navigate_to_status_section():
                 return False
             
-            # Click privacy button
             privacy_btn = self._find(Sel.STATUS_PRIVACY_BTN, timeout=10)
             privacy_btn.click()
             time.sleep(1)
@@ -724,105 +1003,6 @@ class WhatsAppBot:
         except Exception as e:
             logger.error(f"Failed to set status privacy: {e}")
             return False
-    
-    # ── Status Watching (Existing) ────────────────────────────────────────
-    
-    def start_status_watcher(self, callback: Optional[Callable] = None) -> None:
-        """Start background thread to watch for new status updates."""
-        if callback:
-            self._status_callbacks.append(callback)
-            
-        if self._status_watcher and self._status_watcher.is_alive():
-            logger.warning("Status watcher already running")
-            return
-            
-        self._stop_status_watcher.clear()
-        self._status_watcher = Thread(target=self._watch_status_loop, daemon=True)
-        self._status_watcher.start()
-        logger.info("👁️ Status watcher started")
-        
-    def stop_status_watcher(self) -> None:
-        """Stop the status watcher thread."""
-        self._stop_status_watcher.set()
-        if self._status_watcher:
-            self._status_watcher.join(timeout=5)
-        logger.info("Status watcher stopped")
-        
-    def add_status_callback(self, callback: Callable) -> None:
-        """Add callback function for status updates."""
-        self._status_callbacks.append(callback)
-        
-    def _watch_status_loop(self) -> None:
-        """Background loop checking for status updates."""
-        seen_statuses = set()
-        
-        while not self._stop_status_watcher.is_set():
-            try:
-                status_updates = self.driver.find_elements(By.XPATH, Sel.STATUS_UPDATES)
-                
-                if status_updates:
-                    status_updates[0].click()
-                    time.sleep(1)
-                    
-                    statuses = self.driver.find_elements(By.XPATH, Sel.STATUS_THUMBNAIL)
-                    
-                    for status in statuses:
-                        try:
-                            name_el = status.find_element(By.XPATH, './/span[@dir="auto"]')
-                            contact_name = name_el.text
-                            status_id = f"{contact_name}_{datetime.now().date()}"
-                            
-                            if status_id not in seen_statuses:
-                                seen_statuses.add(status_id)
-                                
-                                status_data = {
-                                    'contact': contact_name,
-                                    'timestamp': datetime.now(),
-                                    'type': 'status'
-                                }
-                                
-                                for callback in self._status_callbacks:
-                                    try:
-                                        callback(status_data)
-                                    except Exception as e:
-                                        logger.error(f"Status callback error: {e}")
-                                        
-                        except Exception as e:
-                            continue
-                            
-                    self.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
-                    
-                time.sleep(self.config.watch_status_interval)
-                
-            except Exception as e:
-                logger.error(f"Status watcher error: {e}")
-                time.sleep(5)
-                
-    def view_contact_status(self, contact_name: str) -> Optional[str]:
-        """View a specific contact's status."""
-        try:
-            self._find(Sel.STATUS_UPDATES).click()
-            time.sleep(1)
-            
-            statuses = self.driver.find_elements(By.XPATH, Sel.STATUS_THUMBNAIL)
-            for status in statuses:
-                name_el = status.find_element(By.XPATH, './/span[@dir="auto"]')
-                if name_el.text == contact_name:
-                    status.click()
-                    time.sleep(2)
-                    
-                    status_text = self._exists(Sel.STATUS_TEXT, timeout=2)
-                    text = status_text.text if status_text else "(No text)"
-                    
-                    self.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
-                    return text
-                    
-            logger.warning(f"No status found for {contact_name}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Failed to view status: {e}")
-            return None
     
     # ── Group Messaging ──────────────────────────────────────────────────
     
@@ -867,7 +1047,7 @@ class WhatsAppBot:
     
     def send_media(self, file_path: str, caption: str = "", 
                    as_document: bool = False) -> bool:
-        """Send media file (image, video, document) in best quality."""
+        """Send media file in best quality."""
         abs_path = str(Path(file_path).resolve())
         if not Path(abs_path).exists():
             raise FileNotFoundError(f"File not found: {abs_path}")
@@ -939,9 +1119,6 @@ class WhatsAppBot:
             code = re.sub(r'[^A-Z0-9-]', '', code.upper())
             
             logger.info(f"📱 Linking code: {code}")
-            logger.info("👉 Open WhatsApp on your phone → Settings → Linked Devices → Link a device")
-            logger.info(f"👉 Enter this code: {code}")
-            
             self._wait_for_linked_device(timeout=60)
             return code
             
@@ -959,16 +1136,11 @@ class WhatsAppBot:
                 if self._exists(Sel.SEARCH_BOX, timeout=2):
                     logger.info("✅ Device successfully linked!")
                     return True
-                    
-                linked_msg = '//div[contains(text(), "linked")]'
-                if self._exists(linked_msg, timeout=1):
-                    logger.info("✅ Device linked confirmation received!")
-                    return True
             except:
                 pass
             time.sleep(2)
             
-        logger.warning("Timeout waiting for device linking confirmation")
+        logger.warning("Timeout waiting for device linking")
         return False
     
     # ── Utility Methods ──────────────────────────────────────────────────
@@ -1055,36 +1227,10 @@ class WhatsAppBot:
                 EC.presence_of_element_located((By.XPATH, Sel.SEARCH_BOX))
             )
             logger.info("✅ QR code scanned successfully")
-            
-    def open_chat(self, contact_name: str) -> None:
-        """Open chat by contact name."""
-        logger.info(f"Opening chat: {contact_name}")
-        
-        search = self._find(Sel.SEARCH_BOX)
-        search.click()
-        search.send_keys(Keys.CONTROL + "a")
-        search.send_keys(Keys.DELETE)
-        
-        self._human_type(search, contact_name, clear_first=False)
-        time.sleep(1.2)
-        
-        row_xpath = Sel.CHAT_ROW_BY_NAME.format(name=contact_name)
-        try:
-            row = WebDriverWait(self.driver, self.config.element_timeout).until(
-                EC.element_to_be_clickable((By.XPATH, row_xpath))
-            )
-            self._human_mouse_move(row)
-            row.click()
-            time.sleep(0.8)
-            logger.info(f"Chat opened: {contact_name}")
-        except TimeoutException:
-            search.send_keys(Keys.ESCAPE)
-            raise TimeoutException(f"Contact '{contact_name}' not found")
 
 
 # ── Example Usage & Testing (ELITE v4) ───────────────────────────────────────
 if __name__ == "__main__":
-    # Configuration
     config = BotConfig(
         firefox_profile_path="/home/kernel/.mozilla/firefox/x4o5i1pe.default-esr",
         enable_human_typing=True,
@@ -1093,66 +1239,38 @@ if __name__ == "__main__":
     )
     
     with WhatsAppBot(config) as bot:
+        # Example: Post a status
+        # bot.post_text_status("Hello from Elite v4! 🚀", background_color="#128C7E")
         
-        # ═══════════════════════════════════════════════════════════════
-        #  NEW: STATUS POSTING EXAMPLES
-        # ═══════════════════════════════════════════════════════════════
+        message = """
+👋 *Hello,*
+
+A bit unconventional—but intentional.
+
+I’m expanding my circle with *focused, growth-minded people* 🚀
+*Accountant 📊 | Data Analyst 📈 | Digital Marketer 💻*
+
+I value *real connections, insights, and opportunities.*
+
+👉 If that resonates, kindly *reply with your name* (as you’d like it saved).
+👉 If not, no worries at all 👍 — no follow-ups from me.
+
+*Wishing you growth and success either way.* ✨
+
+        """
         
-        # Example 1: Post a simple text status
-        # bot.post_text_status("Good morning! ☀️ Have a great day!")
+        # Example: Watch for statuses
+        def on_status(status):
+            print(f"📢 NEW STATUS from {status['contact']}: {status['text'][:50] if status['text'] else '(no text)'}")
         
-        # Example 2: Post a colored text status
-        # bot.post_text_status("Feeling blessed! ✨", background_color="#128C7E")
+        # bot.start_status_watcher(callback=on_status)
+        contacts = bot.load_contacts_from_csv("/home/kernel/projects/watsApp/contacts_1.csv")
+        bot.broadcast_to_contacts(contacts, message)
         
-        # Example 3: Post a photo status
-        # bot.post_photo_status("/path/to/photo.jpg", "Beautiful sunset! 🌅")
-        
-        # Example 4: Post a video status
-        # bot.post_video_status("/path/to/video.mp4", "Check this out! 🎬")
-        
-        # Example 5: Post a motivational quote status
-        # bot.post_motivational_quote()
-        
-        # Example 6: Post a custom quote
-        # bot.post_quote_status("The best time to plant a tree was 20 years ago. The second best time is now.", "Chinese Proverb", background_color="#075E54")
-        
-        # Example 7: Set status privacy before posting
-        # bot.set_status_privacy("my_contacts")
-        # bot.post_text_status("Only my contacts can see this!")
-        
-        # Example 8: Delete my current status
-        # bot.delete_my_status()
-        
-        # Example 9: Watch for new statuses from contacts
-        # def on_new_status(status):
-        #     print(f"📢 New status from {status['contact']} at {status['timestamp']}")
-        # bot.start_status_watcher(callback=on_new_status)
-        # time.sleep(60)
-        # bot.stop_status_watcher()
-        
-        # Example 10: View a contact's status
-        # text = bot.view_contact_status("John Doe")
-        # if text:
-        #     print(f"Status: {text}")
-        
-        # Example 11: Original functionality still works
-        # bot.open_chat("~Taliban Mkristu")
-        # bot.send_message("Hello from Elite v4!")
-        
-        print("✅ WhatsApp Bot v4 (ELITE) is ready!")
-        print("\n📱 Status Posting Features Available:")
-        print("  - post_text_status(text, background_color, font_size)")
-        print("  - post_photo_status(image_path, caption)")
-        print("  - post_video_status(video_path, caption)")
-        print("  - post_quote_status(quote, author, background_color)")
-        print("  - post_motivational_quote()")
-        print("  - delete_my_status()")
-        print("  - set_status_privacy(privacy_type)")
-        print("\n💬 Keep the bot running... (Press Ctrl+C to stop)")
-        
-        # Keep the bot running
+        # Keep running
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
+            bot.stop_status_watcher()
             print("\n👋 Shutting down...")
